@@ -2,7 +2,7 @@
 
 A development-stage Order Management System (OMS) backend built in Go. It uses a layered architecture, a deterministic order state machine, a transactional repository, and an in-process database-backed worker.
 
-> **Security status:** OMS V1 is not production-ready. Remaining security, release-readiness, and local-environment hardening tasks are tracked in [`docs/BLOCKERS.md`](docs/BLOCKERS.md).
+> **Security status:** OMS V1 is not production-ready. Remaining security, release-readiness, and local-environment hardening tasks are tracked separately from this public README.
 
 ---
 
@@ -120,6 +120,8 @@ The API configures itself through the following environment variables:
 | `HTTP_READ_TIMEOUT` | `5s` | Read deadline for slow-client protection. |
 | `HTTP_WRITE_TIMEOUT` | `10s` | Write deadline for server response limits. |
 | `HTTP_IDLE_TIMEOUT` | `60s` | Idle keep-alive connection lifespan. |
+
+The API verifies that PostgreSQL is reachable during startup and exits before serving requests if the database connection cannot be established.
 
 ### Development Mode (`OMS_AUTH_MODE=dev`)
 Protected endpoints accept trusted identity variables passed as headers:

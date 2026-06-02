@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"oms/internal/auth"
 	"oms/internal/orders"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const databasePingTimeout = 5 * time.Second
+
+type databasePinger interface {
+	Ping(context.Context) error
+}
 
 func main() {
 	logger := platform.NewLogger()
@@ -42,6 +49,11 @@ func main() {
 		return
 	}
 	defer dbPool.Close()
+
+	if err := pingDatabase(appCtx, dbPool); err != nil {
+		logger.Error("connect database failed", slog.Any("error", err))
+		return
+	}
 
 	repo := orders.NewRepository(dbPool)
 	service := orders.NewService(repo)
@@ -89,4 +101,11 @@ func main() {
 
 	wg.Wait()
 	logger.Info("http server stopped cleanly")
+}
+
+func pingDatabase(ctx context.Context, database databasePinger) error {
+	pingCtx, cancel := context.WithTimeout(ctx, databasePingTimeout)
+	defer cancel()
+
+	return database.Ping(pingCtx)
 }
