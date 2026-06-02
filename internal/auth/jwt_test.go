@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -167,6 +168,133 @@ func TestJWTIdentityMiddlewareAcceptsDiscoveryMetadata(t *testing.T) {
 	}
 }
 
+func TestJWTIdentityMiddlewareRejectsSlowDiscoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(discoveryDocument{})
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := newJWTFixture(t).config()
+	cfg.JWKSURL = ""
+	cfg.OIDCDiscoveryURL = server.URL
+	cfg.HTTPTimeout = 20 * time.Millisecond
+
+	started := time.Now()
+	_, err := newIdentityMiddleware(context.Background(), server.Client(), cfg)
+	if err == nil {
+		t.Fatal("expected slow discovery metadata error")
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("expected bounded discovery failure, took %s", time.Since(started))
+	}
+}
+
+func TestJWTIdentityMiddlewareRejectsSlowJWKSMetadata(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := newJWTFixture(t).config()
+	cfg.JWKSURL = server.URL
+	cfg.HTTPTimeout = 20 * time.Millisecond
+
+	started := time.Now()
+	_, err := newIdentityMiddleware(context.Background(), server.Client(), cfg)
+	if err == nil {
+		t.Fatal("expected slow JWKS metadata error")
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("expected bounded JWKS failure, took %s", time.Since(started))
+	}
+}
+
+func TestJWTIdentityMiddlewareRejectsOversizedDiscoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issuer":"` + strings.Repeat("x", int(maxJWTMetadataResponseBytes)) + `"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := newJWTFixture(t).config()
+	cfg.JWKSURL = ""
+	cfg.OIDCDiscoveryURL = server.URL
+
+	_, err := newIdentityMiddleware(context.Background(), server.Client(), cfg)
+	if err == nil || !strings.Contains(err.Error(), errJWTMetadataResponseTooLarge.Error()) {
+		t.Fatalf("expected oversized discovery metadata error, got %v", err)
+	}
+}
+
+func TestJWTIdentityMiddlewareRejectsOversizedJWKSMetadata(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"keys":[` + strings.Repeat(" ", int(maxJWTMetadataResponseBytes))))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := newJWTFixture(t).config()
+	cfg.JWKSURL = server.URL
+
+	_, err := newIdentityMiddleware(context.Background(), server.Client(), cfg)
+	if err == nil || !strings.Contains(err.Error(), errJWTMetadataResponseTooLarge.Error()) {
+		t.Fatalf("expected oversized JWKS metadata error, got %v", err)
+	}
+}
+
+func TestJWTIdentityMiddlewareBoundsUnknownKeyRefresh(t *testing.T) {
+	t.Parallel()
+
+	fixture := newJWTFixture(t)
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) > 1 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]string{rsaJWK(&fixture.key.PublicKey)},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := fixture.config()
+	cfg.JWKSURL = server.URL
+	cfg.HTTPTimeout = 20 * time.Millisecond
+	middleware, err := newIdentityMiddleware(context.Background(), server.Client(), cfg)
+	if err != nil {
+		t.Fatalf("initialize JWT middleware: %v", err)
+	}
+	token := fixture.signWithKID(t, fixture.key, "RS256", "unknown-key", map[string]any{
+		"sub":         "customer-subject",
+		"role":        "customer",
+		"customer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+	})
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unexpected next handler call")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/orders", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	started := time.Now()
+	handler.ServeHTTP(rec, req)
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("expected bounded unknown-key refresh failure, took %s", time.Since(started))
+	}
+	assertAuthErrorResponse(t, rec, http.StatusUnauthorized, "unauthorized")
+	if strings.Contains(rec.Body.String(), token) || strings.Contains(rec.Body.String(), "Authorization") {
+		t.Fatalf("expected generic auth error body, got %s", rec.Body.String())
+	}
+}
+
 func TestJWTIdentityMiddlewareCustomerCannotAccessPrivilegedRoute(t *testing.T) {
 	t.Parallel()
 
@@ -272,6 +400,7 @@ func (f *jwtFixture) config() Config {
 		RoleCustomerValue: "customer",
 		RoleAdminValue:    "admin",
 		RoleSystemValue:   "system",
+		HTTPTimeout:       5 * time.Second,
 	}
 }
 
@@ -300,11 +429,15 @@ func (f *jwtFixture) serve(t *testing.T, cfg Config, token string, capture func(
 }
 
 func (f *jwtFixture) sign(t *testing.T, key *rsa.PrivateKey, algorithm string, overrides map[string]any) string {
+	return f.signWithKID(t, key, algorithm, "test-key", overrides)
+}
+
+func (f *jwtFixture) signWithKID(t *testing.T, key *rsa.PrivateKey, algorithm, keyID string, overrides map[string]any) string {
 	t.Helper()
 
 	header := encodeJWTPart(t, map[string]any{
 		"alg": algorithm,
-		"kid": "test-key",
+		"kid": keyID,
 		"typ": "JWT",
 	})
 	claims := map[string]any{

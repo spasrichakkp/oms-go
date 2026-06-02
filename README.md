@@ -1,6 +1,8 @@
-# 📦 Order Management System (OMS) - V1
+# Order Management System (OMS) - V1
 
-An elegant, low-latency, and highly secure Order Management System (OMS) backend built in Go. It operates with a layered architecture, a deterministic order state machine, a transactional repository, and an in-process database-backed worker.
+A development-stage Order Management System (OMS) backend built in Go. It uses a layered architecture, a deterministic order state machine, a transactional repository, and an in-process database-backed worker.
+
+> **Security status:** OMS V1 is not production-ready. Remaining security, release-readiness, and local-environment hardening tasks are tracked in [`docs/BLOCKERS.md`](docs/BLOCKERS.md).
 
 ---
 
@@ -69,6 +71,8 @@ Run the multi-stage build and spin up the database container:
 docker compose -f deploy/docker-compose.yml up --build -d
 ```
 
+The local Compose stack publishes the API and PostgreSQL only on `127.0.0.1`. Its trusted dev-header auth mode and fixed PostgreSQL credentials are local-development conveniences, not LAN or production defaults.
+
 ### Step 2: Apply the Database Schema Migrations
 Apply the initial table schemas, unique constraints, and optimized indexes to the running container:
 ```bash
@@ -111,6 +115,7 @@ The API configures itself through the following environment variables:
 | :--- | :--- | :--- |
 | `DATABASE_URL` | *Required* | PostgreSQL connection string. |
 | `OMS_AUTH_MODE` | `""` (Locked) | Authentication mode: `""` (Fail-closed), `dev` (Local headers), `jwt` (Bearer tokens). |
+| `OMS_JWT_HTTP_TIMEOUT` | `5s` | JWT-mode timeout for OIDC discovery and JWKS fetches, including key refresh. Invalid, zero, or negative values fail startup. |
 | `WORKER_BATCH_SIZE` | `500` | Max number of PENDING orders the background worker processes per iteration. |
 | `HTTP_READ_TIMEOUT` | `5s` | Read deadline for slow-client protection. |
 | `HTTP_WRITE_TIMEOUT` | `10s` | Write deadline for server response limits. |
