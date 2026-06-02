@@ -143,6 +143,22 @@ func TestLoadConfigAcceptsJWTAuthMode(t *testing.T) {
 	if len(cfg.AuthConfig.AllowedAlgorithms) != 2 || cfg.AuthConfig.AllowedAlgorithms[0] != "RS256" || cfg.AuthConfig.AllowedAlgorithms[1] != "ES256" {
 		t.Fatalf("expected allowed algorithms to be parsed, got %#v", cfg.AuthConfig.AllowedAlgorithms)
 	}
+	if cfg.AuthConfig.HTTPTimeout != defaultJWTHTTPTimeout {
+		t.Fatalf("expected default JWT HTTP timeout %s, got %s", defaultJWTHTTPTimeout, cfg.AuthConfig.HTTPTimeout)
+	}
+}
+
+func TestLoadConfigAcceptsCustomJWTHTTPTimeout(t *testing.T) {
+	setValidJWTEnv(t)
+	t.Setenv("OMS_JWT_HTTP_TIMEOUT", "3s")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.AuthConfig.HTTPTimeout != 3*time.Second {
+		t.Fatalf("expected JWT HTTP timeout 3s, got %s", cfg.AuthConfig.HTTPTimeout)
+	}
 }
 
 func TestLoadConfigRejectsInvalidJWTAuthConfig(t *testing.T) {
@@ -181,6 +197,24 @@ func TestLoadConfigRejectsInvalidJWTAuthConfig(t *testing.T) {
 			envName:   "OMS_JWT_ROLE_ADMIN_VALUE",
 			envValue:  "customer",
 			wantError: "OMS JWT role values must be distinct",
+		},
+		{
+			name:      "invalid HTTP timeout syntax",
+			envName:   "OMS_JWT_HTTP_TIMEOUT",
+			envValue:  "later",
+			wantError: "OMS_JWT_HTTP_TIMEOUT must be a valid duration",
+		},
+		{
+			name:      "zero HTTP timeout",
+			envName:   "OMS_JWT_HTTP_TIMEOUT",
+			envValue:  "0s",
+			wantError: "OMS_JWT_HTTP_TIMEOUT must be a positive duration",
+		},
+		{
+			name:      "negative HTTP timeout",
+			envName:   "OMS_JWT_HTTP_TIMEOUT",
+			envValue:  "-1s",
+			wantError: "OMS_JWT_HTTP_TIMEOUT must be a positive duration",
 		},
 	}
 
@@ -229,4 +263,5 @@ func setValidJWTEnv(t *testing.T) {
 	t.Setenv("OMS_JWT_ROLE_CUSTOMER_VALUE", "customer")
 	t.Setenv("OMS_JWT_ROLE_ADMIN_VALUE", "admin")
 	t.Setenv("OMS_JWT_ROLE_SYSTEM_VALUE", "system")
+	t.Setenv("OMS_JWT_HTTP_TIMEOUT", "")
 }

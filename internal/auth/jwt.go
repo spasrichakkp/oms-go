@@ -5,13 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 )
+
+const maxJWTMetadataResponseBytes int64 = 1 << 20
+
+var errJWTMetadataResponseTooLarge = errors.New("JWT metadata response exceeds size limit")
 
 type Config struct {
 	Mode              Mode
@@ -26,6 +32,7 @@ type Config struct {
 	RoleCustomerValue string
 	RoleAdminValue    string
 	RoleSystemValue   string
+	HTTPTimeout       time.Duration
 }
 
 type Middleware func(http.Handler) http.Handler
@@ -53,6 +60,11 @@ func newIdentityMiddleware(ctx context.Context, client *http.Client, cfg Config)
 }
 
 func newJWTIdentityMiddleware(ctx context.Context, client *http.Client, cfg Config) (Middleware, error) {
+	if cfg.HTTPTimeout <= 0 {
+		return nil, errors.New("JWT HTTP timeout must be positive")
+	}
+	client = boundedJWTHTTPClient(client, cfg.HTTPTimeout)
+
 	jwksURL := cfg.JWKSURL
 	if cfg.OIDCDiscoveryURL != "" {
 		discovery, err := fetchDiscoveryDocument(ctx, client, cfg.OIDCDiscoveryURL)
@@ -69,6 +81,9 @@ func newJWTIdentityMiddleware(ctx context.Context, client *http.Client, cfg Conf
 	}
 	if err := validateHTTPSURL(jwksURL); err != nil {
 		return nil, err
+	}
+	if err := probeJWKS(ctx, client, jwksURL); err != nil {
+		return nil, fmt.Errorf("load JWKS document: %w", err)
 	}
 
 	keySetContext := oidc.ClientContext(ctx, client)
@@ -103,28 +118,113 @@ func newJWTIdentityMiddleware(ctx context.Context, client *http.Client, cfg Conf
 	}, nil
 }
 
+func probeJWKS(ctx context.Context, client *http.Client, jwksURL string) error {
+	var document struct {
+		Keys []json.RawMessage `json:"keys"`
+	}
+	if err := fetchMetadataDocument(ctx, client, jwksURL, &document); err != nil {
+		return err
+	}
+	if len(document.Keys) == 0 {
+		return errors.New("JWKS document contains no keys")
+	}
+
+	return nil
+}
+
 func fetchDiscoveryDocument(ctx context.Context, client *http.Client, discoveryURL string) (discoveryDocument, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
-	if err != nil {
-		return discoveryDocument{}, err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return discoveryDocument{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return discoveryDocument{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-
 	var discovery discoveryDocument
-	if err := json.NewDecoder(resp.Body).Decode(&discovery); err != nil {
+	if err := fetchMetadataDocument(ctx, client, discoveryURL, &discovery); err != nil {
 		return discoveryDocument{}, err
 	}
 
 	return discovery, nil
+}
+
+func fetchMetadataDocument(ctx context.Context, client *http.Client, metadataURL string, destination any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(destination); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func boundedJWTHTTPClient(client *http.Client, timeout time.Duration) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	bounded := *client
+	bounded.Timeout = timeout
+	bounded.Transport = jwtMetadataLimitTransport{base: client.Transport}
+
+	return &bounded
+}
+
+type jwtMetadataLimitTransport struct {
+	base http.RoundTripper
+}
+
+func (t jwtMetadataLimitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+
+	resp, err := base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = &maxBytesReadCloser{
+		ReadCloser: resp.Body,
+		remaining:  maxJWTMetadataResponseBytes,
+	}
+
+	return resp, nil
+}
+
+type maxBytesReadCloser struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (r *maxBytesReadCloser) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		var extra [1]byte
+		n, err := r.ReadCloser.Read(extra[:])
+		if n > 0 {
+			return 0, errJWTMetadataResponseTooLarge
+		}
+		return 0, err
+	}
+
+	if int64(len(p)) > r.remaining+1 {
+		p = p[:r.remaining+1]
+	}
+	n, err := r.ReadCloser.Read(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+		r.remaining = 0
+		return n, errJWTMetadataResponseTooLarge
+	}
+	r.remaining -= int64(n)
+
+	return n, err
 }
 
 func validateHTTPSURL(value string) error {

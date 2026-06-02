@@ -12,7 +12,7 @@ services:
       retries: 12
       start_period: 5s
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -29,7 +29,7 @@ services:
       WORKER_BATCH_SIZE: "${WORKER_BATCH_SIZE:-}"
       OMS_AUTH_MODE: "dev"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
 
 volumes:
   postgres_data:

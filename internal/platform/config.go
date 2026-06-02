@@ -19,6 +19,7 @@ const (
 	defaultReadTimeout     = 5 * time.Second
 	defaultWriteTimeout    = 10 * time.Second
 	defaultIdleTimeout     = 60 * time.Second
+	defaultJWTHTTPTimeout  = 5 * time.Second
 )
 
 type Config struct {
@@ -141,6 +142,11 @@ func loadAuthConfig(mode auth.Mode) (auth.Config, error) {
 	cfg.RoleCustomerValue = envTrimmed("OMS_JWT_ROLE_CUSTOMER_VALUE")
 	cfg.RoleAdminValue = envTrimmed("OMS_JWT_ROLE_ADMIN_VALUE")
 	cfg.RoleSystemValue = envTrimmed("OMS_JWT_ROLE_SYSTEM_VALUE")
+	jwtHTTPTimeout, err := parsePositiveDurationEnv("OMS_JWT_HTTP_TIMEOUT", defaultJWTHTTPTimeout)
+	if err != nil {
+		return auth.Config{}, err
+	}
+	cfg.HTTPTimeout = jwtHTTPTimeout
 
 	for name, value := range map[string]string{
 		"OMS_JWT_ISSUER":              cfg.Issuer,
