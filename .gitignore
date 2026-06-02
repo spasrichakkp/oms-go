@@ -1,0 +1,22 @@
+# User requested exclusions
+docs/
+AGENT.md
+AGENTS.md
+.agents/
+
+# System and editor files
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Docker data volumes
+deploy/postgres_data/
+oms_postgres16_data/
+
+# Go binaries and build artifacts
+bin/
+dist/
+*.exe
+*.test
+*.prof

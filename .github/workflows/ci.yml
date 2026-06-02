@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: "1.26.3"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "22"
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Check sqlc generated-code drift
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src sqlc/sqlc:1.31.1@sha256:70f53171d27b2424e9358869975455a6e955a5aa8e58a998a270a6e34e525537 generate
+          git diff --exit-code
+
+      - name: Lint OpenAPI contract
+        run: npx -y @redocly/cli@2.31.5 lint api/openapi.yaml
+
+  integration:
+    name: PostgreSQL Integration
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16@sha256:4b7183ac05f8ef417db21fd72d71047a4238340c261d3cc3ddb6d579ab5071ae
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: oms
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d oms"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: "1.26.3"
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run PostgreSQL integration tests
+        env:
+          OMS_RUN_INTEGRATION: "1"
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/oms?sslmode=disable
+        run: go test ./internal/orders -run Integration -count=1
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Build API image
+        run: docker build -f deploy/Dockerfile -t oms-api:ci .
